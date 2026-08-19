@@ -1,0 +1,86 @@
+name: release
+
+# Mint a version only when the push changes the runtime. Test-only, dev/ and
+# README commits do not tag, so a release always corresponds to a change a
+# consumer of the fork can observe.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'clojure/**'
+      - '*.lisp'
+      - '*.asd'
+      - 'core-syms.txt'
+      - 'pprint-syms.txt'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install SBCL and Quicklisp
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl
+          curl -sSLo /tmp/quicklisp.lisp https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive \
+               --load /tmp/quicklisp.lisp \
+               --eval '(quicklisp-quickstart:install :path "~/quicklisp/")'
+          mkdir -p ~/quicklisp/local-projects
+          ln -s "$GITHUB_WORKSPACE" ~/quicklisp/local-projects/cloture
+
+      # Gate BEFORE the tag: cloture.test/run-cloture-tests signals unless every
+      # test passed, so a red suite exits non-zero here and mints nothing.
+      - name: Test
+        run: |
+          sbcl --non-interactive \
+               --load ~/quicklisp/setup.lisp \
+               --eval '(ql:quickload :cloture-test :verbose nil)' \
+               --eval '(asdf:test-system :cloture-test)'
+
+      - name: Resolve the version to release
+        id: version
+        run: |
+          VER=$(cat VERSION)
+          if git rev-parse -q --verify "refs/tags/v$VER" >/dev/null; then
+            VER=$(awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}' VERSION)
+            echo "$VER" > VERSION
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag
+        env:
+          VER: ${{ steps.version.outputs.version }}
+          BUMPED: ${{ steps.version.outputs.bumped }}
+        run: |
+          git config user.name  "hive-ci"
+          git config user.email "ci@hive-agi.local"
+          if [ "$BUMPED" = "true" ]; then
+            git add VERSION
+            # [skip ci] stops this push from retriggering the workflow.
+            git commit -m "chore(release): $VER [skip ci]"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          fi
+          # Annotated, and pushed by name: `--follow-tags` would drop it on the
+          # run that mints the VERSION already in the tree and pushes no commit.
+          git tag -a "v$VER" -m "release $VER"
+          git push origin "refs/tags/v$VER"
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          generate_release_notes: true
