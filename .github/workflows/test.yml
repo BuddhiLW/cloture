@@ -1,0 +1,39 @@
+name: test
+
+# The suite is the gate on the way in. release.yml runs it again before it
+# mints a version; this one runs it on the change while it can still be fixed.
+on:
+  pull_request:
+  push:
+    branches-ignore: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL and Quicklisp
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl
+          curl -sSLo /tmp/quicklisp.lisp https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive \
+               --load /tmp/quicklisp.lisp \
+               --eval '(quicklisp-quickstart:install :path "~/quicklisp/")'
+          mkdir -p ~/quicklisp/local-projects
+          ln -s "$GITHUB_WORKSPACE" ~/quicklisp/local-projects/cloture
+
+      # cloture.test/run-cloture-tests signals unless every test passed, so a
+      # red suite exits non-zero here.
+      - name: Test
+        run: |
+          sbcl --non-interactive \
+               --load ~/quicklisp/setup.lisp \
+               --eval '(ql:quickload :cloture-test :verbose nil)' \
+               --eval '(asdf:test-system :cloture-test)'
